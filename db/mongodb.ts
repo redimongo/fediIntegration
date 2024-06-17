@@ -94,10 +94,12 @@ const updateUser = async (username: string, data: any): Promise<WithId<any> | nu
 };
 
 
-const addFollower = async(follower: any): Promise<WithId<any> | null> => {
+const addFollower = async(username: string, follower: any): Promise<WithId<any> | null> => {
   if (!db) throw new Error('Database not initialized');
 
-  const user = await db.collection('podcast_performance_users').findOne({ username: follower.handle }, { projection: excludedUserFields });
+  const user = await db.collection('podcast_performance_users').findOne({ username }, { projection: excludedUserFields });
+  // Isn't the user._id derived from the username, "fresh7at7"? YES
+  
 
   if (!user) {
     throw new Error('User not found');
@@ -113,7 +115,7 @@ const addFollower = async(follower: any): Promise<WithId<any> | null> => {
   } else {
     await db.collection('podcast_performance_followers').insertOne({
       userId: new ObjectId(user._id),
-      follower,
+      follower, // one second
     });
     console.log('Follower added successfully');
   }
@@ -189,20 +191,28 @@ const unFollowUser = async (username: string, followerUrl: string, actorId: stri
 };
 
 const getFollowersByUserHandle = async (handle: string, page: number, limit: number = 10): Promise<any> => {
-  const collection: Collection = db.collection('podcast_performance_users');
-  const user = await collection.findOne({ username: handle }, { projection: { followers: 1 } });
+  const userDB = await db.collection('podcast_performance_users').findOne({ "username":"fresh7at7" }, { projection: excludedUserFields });
 
-  if (!user || !user.followers) {
+  if(!userDB){
+    console.log("NO USER FOUND")
+    return; // maybe it's better to throw an error here?
+  }
+  
+  const collection: Collection = db.collection('podcast_performance_followers');
+  const usersCursor = await collection.find({ "userId": new ObjectId(userDB._id) }); // Then let's rename this to users
+  const users = await usersCursor.toArray();
+  console.log(JSON.stringify(users));
+  if (!users) { 
     return { users: [], totalItems: 0, nextPage: null, last: true };
   }
 
-  const totalItems = user.followers.length;
-  const startIndex = (page - 1) * limit;
-  const followers = user.followers.slice(startIndex, startIndex + limit);
-  const nextPage = startIndex + limit < totalItems ? page + 1 : null;
-  const last = startIndex + limit >= totalItems;
+  const totalItems = await collection.countDocuments({ "userId": new ObjectId(userDB._id) });
+  // const startIndex = (page - 1) * limit;
+  // const followers = users.slice(startIndex, startIndex + limit);
+  // const nextPage = startIndex + limit < totalItems ? page + 1 : null;
+  // const last = startIndex + limit >= totalItems;
 
-  return { users: followers, totalItems, nextPage, last };
+  return { users: users, totalItems, nextPage: null, last: null };
 };
 
 
@@ -292,13 +302,17 @@ const countPostsByUserHandle = async (username: string): Promise<any> => {
 
 const countFollowersByUserHandle = async (username: string): Promise<any> => {
   if (!db) throw new Error('Database not initialized');
- 
   const user = await db.collection('podcast_performance_users').findOne({"username":username});
-  if(!user.followers){
+ 
+  if(!user){
+    throw new Error("NO USER");
+  }
+  const followers = await db.collection('podcast_performance_followers').countDocuments({"userId": new ObjectId(user._id)});
+  if(!followers){
     return 0
   }
   
-  return user.followers.length;
+  return followers;
 
 
  

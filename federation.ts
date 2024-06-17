@@ -1,4 +1,4 @@
-import { Federation, Article, Create, Accept, Person, Group, Follow, exportJwk, generateCryptoKeyPair, importJwk, MemoryKvStore, Image, PropertyValue, PUBLIC_COLLECTION, Recipient, Context, Note, InProcessMessageQueue, getActorHandle, getActorTypeName, Link } from "@fedify/fedify";
+import { Federation, Article, Create, Accept, Person, Group, Follow, exportJwk, generateCryptoKeyPair, importJwk, MemoryKvStore, Image, PropertyValue, PUBLIC_COLLECTION, Recipient, Context, Note, InProcessMessageQueue, getActorHandle, getActorTypeName, Link, RequestContext } from "@fedify/fedify";
 import { federation } from "@fedify/fedify/x/hono";
 import { addFollower, countFollowersByUserHandle, countPostsByUserHandle, findUser, followUser, getFollowersByUserHandle, getPostsByUserHandle, kvGet, kvSet, updateUser } from "./db/mongodb.ts";
 
@@ -180,17 +180,17 @@ async function fetchData(url: string) {
   .setFollowersDispatcher("/users/{handle}/followers", async (ctx, handle, pageParam) => {
     const page = pageParam ? parseInt(pageParam) : 1;
 
-    // Retrieve followers from the database:
-    const { users, totalItems, nextPage, last } = await getFollowersByUserHandle(handle, page, 10);
-
-    console.log(totalItems);
-    // Turn the users into `Recipient` objects:
-    const items = users.map((actor: any) => ({
-      id: actor.followerUrl,
-      inboxId: actor.actorId,
+    //Retrieve followers
+    const { users, totalItems, nextPage, last } = await getFollowersByUserHandle(handle, 0, 10);
+    console.log({totalItems, users}); // users are empty
+    const items = users.map((doc: any) => ({
+      id: new URL(doc.follower.url),
+      inboxId: new URL(doc.follower.inbox),
+      endpoints: {
+        sharedInbox: new URL(doc.follower.sharedInbox),
+      }
     }));
 
-    console.log(JSON.stringify(items));
 
     return {
       "@context": "https://www.w3.org/ns/activitystreams",
@@ -227,16 +227,17 @@ async function fetchData(url: string) {
       console.log(JSON.stringify(parsed));
       if (parsed?.type !== "actor") return;
       const recipient = await follow.getActor(ctx);
-      console.log(recipient);
+      console.log(recipient); // This does not have inboxId
 
       if (
         recipient == null || recipient.id == null ||
         recipient.preferredUsername == null ||
         recipient.inboxId == null
-      ) return;
+      ) return; // which makes this return and stop.
+
       const handle = await getActorHandle(recipient);
-      console.log(handle);
-      await addFollower({
+      console.log(handle); // This printed out: @begutin_acigran@activitypub.academy
+      await addFollower(parsed.handle, {
         activityId: follow.id.href,
         id: recipient.id.href,
         name: recipient.name?.toString() ?? "",
@@ -278,7 +279,7 @@ async function fetchData(url: string) {
      * ***/
 
     export async function sendNote(
-      ctx: Context<void>,
+      ctx: RequestContext<void>,
       senderHandle: string,
       recipient: Recipient,
       message: string
@@ -290,7 +291,7 @@ async function fetchData(url: string) {
 
       await ctx.sendActivity(
         { handle: senderHandle },
-        recipient,
+        "followers",
         new Create({
           actor: ctx.getActorUri(senderHandle),
           to: ctx.getFollowersUri(senderHandle),
@@ -303,12 +304,13 @@ async function fetchData(url: string) {
         }),
         {
           immediate: true,
+          preferSharedInbox: true,
           excludeBaseUris: [ctx.getInboxUri()],
         }
       );
 
     }
-    
+   
     function getHref(link: Link | URL | string | null): string | null {
       if (link == null) return null;
       if (link instanceof Link) return link.href?.href ?? null;
