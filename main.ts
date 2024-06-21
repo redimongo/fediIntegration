@@ -35,6 +35,8 @@ app.use(federationMiddleware);
 
 app.get('/', (c) => c.text('Hono meets Node.js'))
 
+app.get('/users/fresh7at7', (c) => c.text('Hono meets Node.js'));
+app.get('/@fresh7at7', (c) => c.text('Hono meets Node.js'));
 
 // Endpoint to handle the POST request
 app.post('/send', async (c) => {

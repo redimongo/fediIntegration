@@ -1,4 +1,4 @@
-import { Federation, Article, Create, Accept, Person, Group, Follow, exportJwk, generateCryptoKeyPair, importJwk, MemoryKvStore, Image, PropertyValue, PUBLIC_COLLECTION, Recipient, Context, Note, InProcessMessageQueue, getActorHandle, getActorTypeName, Link, RequestContext, Mention } from "@fedify/fedify";
+import { Federation, Article, Create, Accept, Person, Group, Follow, exportJwk, generateCryptoKeyPair, importJwk, MemoryKvStore, Image, PropertyValue, PUBLIC_COLLECTION, Recipient, Context, Note, Question, InProcessMessageQueue, getActorHandle, getActorTypeName, Link, RequestContext, Mention } from "@fedify/fedify";
 import { federation } from "@fedify/fedify/x/hono";
 import { addFollower, countFollowersByUserHandle, countPostsByUserHandle, fetchActivity, findUser, followUser, getFollowersByUserHandle, getPostsByUserHandle, insertActivity, kvGet, kvSet, kvDelete, updateUser } from "./db/mongodb.ts";
 import { reset } from "@logtape/logtape";
@@ -105,7 +105,7 @@ async function fetchData(url: string) {
         actor = new Group({
           id: ctx.getActorUri(handle),
           name: userKey.name,
-          summary: "This is a group!",
+          summary: userKey.description,
           preferredUsername: handle,
           url: new URL(`/@${handle}`, ctx.url),
           inbox: ctx.getInboxUri(handle),
@@ -310,9 +310,8 @@ async function fetchData(url: string) {
         const actorURL = "https://fedi.podcastperformance.com/users/" + senderHandle;
     
         switch (type) {
-          case 'Note': {
-
-            const { html: convertedMessage, mentions } = convertMessageToHTML(message);
+          case 'Question':{
+            const { html: convertedMessage, mentions, ccUrls } = convertMessageToHTML(message);
 
 
             const createActivityResult = await insertActivity({
@@ -328,7 +327,11 @@ async function fetchData(url: string) {
             }
     
             const activityId = actorURL + "/" + createActivityResult.insertedId;
-    
+            const ccArray = [
+              ctx.getFollowersUri(senderHandle).toString(),
+              ...ccUrls
+            ];
+
             await ctx.sendActivity(
               { handle: senderHandle },
               "followers",
@@ -336,12 +339,63 @@ async function fetchData(url: string) {
                 id: new URL(activityId),
                 actor: ctx.getActorUri(senderHandle),
                 to: new URL("https://www.w3.org/ns/activitystreams#Public"),
-                cc: ctx.getFollowersUri(senderHandle),
+                ccs: ccArray.map(url => new URL(url)),
                 object: new Note({
                   id: new URL(activityId),
                   attribution: ctx.getActorUri(senderHandle),
                   to: new URL("https://www.w3.org/ns/activitystreams#Public"),
-                  cc: ctx.getFollowersUri(senderHandle),
+                  ccs: ccArray.map(url => new URL(url)),
+                  content: convertedMessage, // Add the message content here  
+                  tags: mentions
+                  //tags: mentions.length > 0 ? mentions : []  // Add the mentions here
+                }),
+              }),
+              {
+                immediate: true,
+                preferSharedInbox: true,
+                excludeBaseUris: [ctx.getInboxUri()],
+              }
+            );
+    
+            break;
+          }
+
+          case 'Note': {
+
+            const { html: convertedMessage, mentions, ccUrls } = convertMessageToHTML(message);
+
+
+            const createActivityResult = await insertActivity({
+              actor: actorURL,
+              type: "Note",
+              content: convertedMessage,
+              userId: userIs._id,
+              published: new Date()
+            });
+    
+            if (!createActivityResult || !createActivityResult.insertedId) {
+              return "Failed to create activity";
+            }
+    
+            const activityId = actorURL + "/" + createActivityResult.insertedId;
+            const ccArray = [
+              ctx.getFollowersUri(senderHandle).toString(),
+              ...ccUrls
+            ];
+
+            await ctx.sendActivity(
+              { handle: senderHandle },
+              "followers",
+              new Create({
+                id: new URL(activityId),
+                actor: ctx.getActorUri(senderHandle),
+                to: new URL("https://www.w3.org/ns/activitystreams#Public"),
+                ccs: ccArray.map(url => new URL(url)),
+                object: new Note({
+                  id: new URL(activityId),
+                  attribution: ctx.getActorUri(senderHandle),
+                  to: new URL("https://www.w3.org/ns/activitystreams#Public"),
+                  ccs: ccArray.map(url => new URL(url)),
                   content: convertedMessage, // Add the message content here  
                   tags: mentions
                   //tags: mentions.length > 0 ? mentions : []  // Add the mentions here
@@ -370,19 +424,23 @@ async function fetchData(url: string) {
 
    
 
-    function convertMessageToHTML(message: string): { html: string; mentions: Mention[] } {
+    function convertMessageToHTML(message: string): { html: string; mentions: Mention[], ccUrls: string[] } {
       const mentionRegex = /@(\w+)@([\w.-]+)/g;
-      const urlRegex = /(https?:\/\/[^\s]+)/g;
       let mentions: Mention[] = [];
+      let ccUrls: URL[] = [];
     
       // Single pass replacement function
       const messageWithLinksAndMentions = message.replace(/@(\w+)@([\w.-]+)|(https?:\/\/[^\s]+)/g, (match, username, domain, url) => {
         if (username && domain) {
           const mentionUrl = `https://${domain}/@${username}`;
+          const userUrl = `https://${domain}/users/${username}`;
+          const userFollowersUrl = `https://${domain}/users/${username}/followers`;
           mentions.push(new Mention({
             href: new URL(mentionUrl),
             name: `@${username}@${domain}`
           }));
+          ccUrls.push(new URL(userUrl));
+          ccUrls.push(new URL(userFollowersUrl));
           return `<span class="h-card" translate="no"><a href="${mentionUrl}" class="u-url mention">@<span>${username}</span></a></span>`;
         }
         if (url) {
@@ -392,7 +450,7 @@ async function fetchData(url: string) {
       });
     
       // Wrap the final message in <p> tags
-      return { html: `<p>${messageWithLinksAndMentions}</p>`, mentions };
+      return { html: `<p>${messageWithLinksAndMentions}</p>`, mentions, ccUrls };
     }
 
     function getHref(link: Link | URL | string | null): string | null {
