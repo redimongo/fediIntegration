@@ -38,12 +38,12 @@ app.get('/', (c) => c.text('Hono meets Node.js'))
 
 // Endpoint to handle the POST request
 app.post('/send', async (c) => {
-  const { senderHandle, recipient, message } = await c.req.json();
+  const { senderHandle, recipient, type, message } = await c.req.json();
   const ctx = fedi.createContext(c.req.raw, undefined);
 
   
   // Call sendNote function
-  await sendNote(ctx, senderHandle, recipient, message);
+  await sendNote(ctx, senderHandle, recipient, type, message);
   
   return c.json({ status: 'success' });
 });

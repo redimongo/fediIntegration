@@ -1,5 +1,6 @@
 import { load } from "https://deno.land/std@0.224.0/dotenv/mod.ts";
 import { MongoClient, Db, Collection, ObjectId, InsertOneResult, WithId } from "npm:mongodb@6.1.0";
+import { KvKey } from "@fedify/fedify";
 
 // Load environment variables
 const env = await load();
@@ -70,7 +71,7 @@ const createUser = async (data: Record<string, any>): Promise<InsertOneResult<Wi
 const findUser = async (data: Record<string, any>): Promise<WithId<any> | null> => {
   if (!db) throw new Error('Database not initialized');
   const collection: Collection = db.collection('podcast_performance_users');
-  const result = await collection.findOne(data);
+  const result = await collection.findOne(data, { projection: excludedUserFields });
   return result;
 };
 
@@ -274,6 +275,13 @@ const insertActivity = async (data: Record<string, any>): Promise<InsertOneResul
   return result;
 };
 
+const fetchActivity = async (data: Record<string, any>): Promise<any> => {
+  if (!db) throw new Error('Database not initialized');
+  const collection: Collection = db.collection('podcast_performance_activity_note');
+  const result = await collection.findOne(data);
+  return result;
+};
+
 const updateActivity = async (filter: Record<string, any>, data: Record<string, any>): Promise<any> => {
   if (!db) throw new Error('Database not initialized');
   const collection: Collection = db.collection('podcast_performance_activity_note');
@@ -290,7 +298,7 @@ const countPostsByUserHandle = async (username: string): Promise<any> => {
     return null
   }
 
-  const posts = await db.collection('podcast_performance_activity_note').countDocuments({'userId': new ObjectId(user._id), 'me':true});
+  const posts = await db.collection('podcast_performance_activity_note').countDocuments({'userId': new ObjectId(user._id)});
 
   if (!posts) {
     return 0;
@@ -318,38 +326,48 @@ const countFollowersByUserHandle = async (username: string): Promise<any> => {
  
 };
 
-async function getPostsByUserHandle(userId: ObjectId, options: { cursor?: any, limit: number }): Promise<{ posts: any[], nextCursor: string | null, last: boolean }> {
+async function getPostsByUserHandle(userId: ObjectId, options: { cursor: number, limit: number }): Promise<{ posts: any[], nextCursor: string | null, last: boolean }> {
   if (!db) throw new Error('Database not initialized');
   
  
   // Find the posts for the user
   const postsCollection = db.collection('podcast_performance_activity_note');
-  const postsCursor = postsCollection.find({ userId, 'me': true})
+  const postsCursor = postsCollection.find({ 'userId': new ObjectId(userId)})
     .sort({ _id: 1 });
   const posts = await postsCursor.toArray();
-  
+  console.log(JSON.stringify(posts));
   const nextCursor = posts.length === options.limit ? posts[posts.length - 1]._id.toString() : null;
   const last = nextCursor === null;
 
   return { posts, nextCursor, last };
 }
 
+
 /* KEY-VALUE STORE FUNCTIONS */
-const kvGet = async (key: string): Promise<any> => {
+const kvGet = async <T = unknown>(key: KvKey): Promise<T | undefined> => {
   if (!db) throw new Error('Database not initialized');
   const kvCollection = db.collection('podcast_performance_kv_store');
-  const entry = await kvCollection.findOne({ key });
-  return entry ? entry.value : null;
+  const keyString = Array.isArray(key) ? key.join(':') : key;
+  const entry = await kvCollection.findOne({ key: keyString });
+  return entry ? (entry.value as T) : undefined;
 };
 
-const kvSet = async (key: string, value: any): Promise<void> => {
+const kvSet = async (key: KvKey, value: any): Promise<void> => {
   if (!db) throw new Error('Database not initialized');
   const kvCollection = db.collection('podcast_performance_kv_store');
+  const keyString = Array.isArray(key) ? key.join(':') : key;
   await kvCollection.updateOne(
-    { key },
-    { $set: { key, value } },
+    { key: keyString },
+    { $set: { key: keyString, value } },
     { upsert: true }
   );
+};
+
+const kvDelete = async (key: KvKey): Promise<void> => {
+  if (!db) throw new Error('Database not initialized');
+  const kvCollection = db.collection('podcast_performance_kv_store');
+  const keyString = Array.isArray(key) ? key.join(':') : key;
+  await kvCollection.deleteOne({ key: keyString });
 };
 
 export {
@@ -371,12 +389,14 @@ export {
   saveToken,
   getToken,
   insertDocument,
+  fetchActivity,
   upsertDocument,
   checkEpisodeGUID,
   getPerformanceData,
   insertActivity,
   updateActivity,
   kvGet,
-  kvSet
+  kvSet,
+  kvDelete
   // Add other MongoDB functions as needed
 };

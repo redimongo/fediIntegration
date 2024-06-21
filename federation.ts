@@ -1,6 +1,8 @@
-import { Federation, Article, Create, Accept, Person, Group, Follow, exportJwk, generateCryptoKeyPair, importJwk, MemoryKvStore, Image, PropertyValue, PUBLIC_COLLECTION, Recipient, Context, Note, InProcessMessageQueue, getActorHandle, getActorTypeName, Link, RequestContext } from "@fedify/fedify";
+import { Federation, Article, Create, Accept, Person, Group, Follow, exportJwk, generateCryptoKeyPair, importJwk, MemoryKvStore, Image, PropertyValue, PUBLIC_COLLECTION, Recipient, Context, Note, InProcessMessageQueue, getActorHandle, getActorTypeName, Link, RequestContext, Mention } from "@fedify/fedify";
 import { federation } from "@fedify/fedify/x/hono";
-import { addFollower, countFollowersByUserHandle, countPostsByUserHandle, findUser, followUser, getFollowersByUserHandle, getPostsByUserHandle, kvGet, kvSet, updateUser } from "./db/mongodb.ts";
+import { addFollower, countFollowersByUserHandle, countPostsByUserHandle, fetchActivity, findUser, followUser, getFollowersByUserHandle, getPostsByUserHandle, insertActivity, kvGet, kvSet, kvDelete, updateUser } from "./db/mongodb.ts";
+import { reset } from "@logtape/logtape";
+import { ObjectId } from "npm:mongodb@6.1.0";
 
 // Load environment variables from .env file
 const window = 10;
@@ -17,12 +19,12 @@ async function fetchData(url: string) {
   }
   return await response.json();
 }
-
   
   export const fedi = new Federation<void>({
     kv: {
       get: kvGet,
       set: kvSet,
+      delete: kvDelete
     },
     treatHttps: true,
     signatureTimeWindow: { minutes: 5 },
@@ -146,36 +148,46 @@ async function fetchData(url: string) {
     })
     
     fedi
-  .setOutboxDispatcher("/users/{handle}/outbox", async (ctx, handle, cursor) => {
-    if (cursor == null) return null;
-    // Here we use the offset numeric value as the cursor:
-    let userKey = await findUser({ "username": handle });
-    const offset = parseInt(cursor);
-    // The following `getPostsByUserHandle` is a hypothetical function:
-    const { posts, nextCursor, last } = await getPostsByUserHandle(userKey._id, { offset, limit: window });
-  // Turn the posts into `Create` activities:
-    const items = posts.map(post =>
-      new Create({
-        id: new URL(`/posts/${post._id}#activity`, ctx.url),
-        actor: ctx.getActorUri(handle),
-        object: new Article({
-          id: new URL(`/users/${handle}/notes/${post._id}`, ctx.url),
-          summary: "test",
-          content: post.content,
-        }),
-      })
-    );
-    return { items, nextCursor: (offset + window).toString() }
-  })
-  .setCounter(async (ctx, handle) => {
-    // Use static array to count posts for testing
-    return await countPostsByUserHandle(handle);
-  })
-  .setFirstCursor(async (ctx, handle) => "0")
-  .setLastCursor(async (ctx, handle) => {
-    return await countPostsByUserHandle(handle);
-  });
-    
+    .setOutboxDispatcher("/users/{handle}/outbox", async (ctx, handle) => {
+      try {
+        console.log(`Handle: ${handle}`);
+        
+        // Fetch user key
+        let userKey = await findUser({ "username": handle });
+        console.log(`User Key: ${JSON.stringify(userKey)}`);
+        
+        // Fetch posts
+        const { posts, nextCursor, last } = await getPostsByUserHandle(userKey._id, { cursor: 0, limit: 100 });
+        console.log(`Posts: ${JSON.stringify(posts)}`);
+        
+        // Create activities
+        const items = posts.map(post =>
+          new Create({
+            id: new URL(`/users/${handle}/${post._id}#activity`, ctx.url),
+            actor: ctx.getActorUri(handle),
+            object: new Article({
+              id: new URL(`/users/${handle}/${post._id}`, ctx.url),
+              content: post.content,
+            }),
+          })
+        );
+        return { items, nextCursor: (0 + window).toString() };
+      } catch (error) {
+        console.error(`Error in setOutboxDispatcher: ${error}`);
+      }
+    })
+    .setCounter(async (ctx, handle) => {
+      try {
+        return await countPostsByUserHandle(handle);
+      } catch (error) {
+        console.error(`Error in setCounter: ${error}`);
+      }
+    })
+    .setFirstCursor(async (ctx, handle) => "1");
+    /*.setLastCursor(async (ctx, handle) => {
+      return await countPostsByUserHandle(handle);
+    });*/
+      
   fedi
   .setFollowersDispatcher("/users/{handle}/followers", async (ctx, handle, pageParam) => {
     const page = pageParam ? parseInt(pageParam) : 1;
@@ -260,14 +272,16 @@ async function fetchData(url: string) {
 
     fedi.setObjectDispatcher(
       Note,
-      "/users/{handle}/notes/{id}",
+      "/users/{handle}/{id}",
       async (ctx, { handle, id }) => {
         // Work with the database to find the note by the author's handle and the note ID.
+        const activity = await fetchActivity({'_id':new ObjectId(id)})
         //if (note == null) return null;  // Return null if the note is not found.
         return new Note({
           id: ctx.getObjectUri(Note, { handle, id }),
           sensitive:false,
-          content: "hello",
+          content: activity.content,
+          published: activity.published
           // Many more properties...
         });
       }
@@ -282,35 +296,105 @@ async function fetchData(url: string) {
       ctx: RequestContext<void>,
       senderHandle: string,
       recipient: Recipient,
+      type: string,
       message: string
     ) {
       console.log("Sender Handle:", senderHandle);
       console.log("Recipient:", recipient);
-      
-    
-
-      await ctx.sendActivity(
-        { handle: senderHandle },
-        "followers",
-        new Create({
-          actor: ctx.getActorUri(senderHandle),
-          to: ctx.getFollowersUri(senderHandle),
-          object: new Note({
-            attribution: ctx.getActorUri(senderHandle),
-            to: ctx.getFollowersUri(senderHandle),
-            content: message, // Add the message content here
-           
-          }),
-        }),
-        {
-          immediate: true,
-          preferSharedInbox: true,
-          excludeBaseUris: [ctx.getInboxUri()],
+      try {
+        const userIs = await findUser({ 'username': senderHandle });
+        if (!userIs) {
+          return "No user found";
         }
-      );
+    
+        const actorURL = "https://fedi.podcastperformance.com/users/" + senderHandle;
+    
+        switch (type) {
+          case 'Note': {
 
+            const { html: convertedMessage, mentions } = convertMessageToHTML(message);
+
+
+            const createActivityResult = await insertActivity({
+              actor: actorURL,
+              type: "Note",
+              content: convertedMessage,
+              userId: userIs._id,
+              published: new Date()
+            });
+    
+            if (!createActivityResult || !createActivityResult.insertedId) {
+              return "Failed to create activity";
+            }
+    
+            const activityId = actorURL + "/" + createActivityResult.insertedId;
+    
+            await ctx.sendActivity(
+              { handle: senderHandle },
+              "followers",
+              new Create({
+                id: new URL(activityId),
+                actor: ctx.getActorUri(senderHandle),
+                to: new URL("https://www.w3.org/ns/activitystreams#Public"),
+                cc: ctx.getFollowersUri(senderHandle),
+                object: new Note({
+                  id: new URL(activityId),
+                  attribution: ctx.getActorUri(senderHandle),
+                  to: new URL("https://www.w3.org/ns/activitystreams#Public"),
+                  cc: ctx.getFollowersUri(senderHandle),
+                  content: convertedMessage, // Add the message content here  
+                  tags: mentions
+                  //tags: mentions.length > 0 ? mentions : []  // Add the mentions here
+                }),
+              }),
+              {
+                immediate: true,
+                preferSharedInbox: true,
+                excludeBaseUris: [ctx.getInboxUri()],
+              }
+            );
+    
+            break;
+          }
+    
+          default: {
+            console.log("Unsupported activity type:", type);
+            break;
+          }
+        }
+      } catch (error) {
+        console.error("Error in sendNote:", error);
+        return "An error occurred while sending the note.";
+      }
     }
+
    
+
+    function convertMessageToHTML(message: string): { html: string; mentions: Mention[] } {
+      const mentionRegex = /@(\w+)@([\w.-]+)/g;
+      const urlRegex = /(https?:\/\/[^\s]+)/g;
+      let mentions: Mention[] = [];
+    
+      // Single pass replacement function
+      const messageWithLinksAndMentions = message.replace(/@(\w+)@([\w.-]+)|(https?:\/\/[^\s]+)/g, (match, username, domain, url) => {
+        if (username && domain) {
+          const mentionUrl = `https://${domain}/@${username}`;
+          mentions.push(new Mention({
+            href: new URL(mentionUrl),
+            name: `@${username}@${domain}`
+          }));
+          return `<span class="h-card" translate="no"><a href="${mentionUrl}" class="u-url mention">@<span>${username}</span></a></span>`;
+        }
+        if (url) {
+          return `<a href="${url}" target="_blank">${url}</a>`;
+        }
+        return match;
+      });
+    
+      // Wrap the final message in <p> tags
+      return { html: `<p>${messageWithLinksAndMentions}</p>`, mentions };
+    }
+
     function getHref(link: Link | URL | string | null): string | null {
       if (link == null) return null;
       if (link instanceof Link) return link.href?.href ?? null;
